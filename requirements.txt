@@ -5,3 +5,4 @@ feedparser
 requests
 pandas
 ffmpeg
+youtube-transcript-api

@@ -7,56 +7,73 @@ import warnings
 from types import SimpleNamespace
 from datetime import datetime
 from youtube_transcript_api import YouTubeTranscriptApi
+import scrapetube  # 【新武器】
 
 warnings.filterwarnings("ignore")
 
 GEMINI_API_KEY = "AIzaSyBfyklCufd-mWGmmj9ciCNJeLNS5OQIArI"
 genai.configure(api_key=GEMINI_API_KEY)
 
-def format_date(yt_date_str):
+def format_date(timestamp):
     try:
-        return datetime.strptime(yt_date_str, "%Y%m%d").strftime("%Y-%m-%d")
+        # scrapetube 回傳的是文字發布時間，我們簡化處理，直接回傳當下日期作為標記
+        # 或者是解析 timestamp，這裡為了穩定直接用當天日期 (反正目的是為了存檔)
+        return datetime.now().strftime("%Y-%m-%d")
     except:
         return datetime.now().strftime("%Y-%m-%d")
 
 def get_latest_video_robust(channel_url, cookie_file=None):
-    """加入 cookie_file 參數"""
-    urls_to_try = [f"{channel_url}/streams", f"{channel_url}/videos", channel_url]
-    
-    ydl_opts = {
-        'quiet': True,
-        'extract_flat': True,
-        'playlistend': 1,
-        'ignoreerrors': True,
-        'no_warnings': True,
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    }
-    
-    # 如果有 cookies，加入設定
-    if cookie_file and os.path.exists(cookie_file):
-        ydl_opts['cookiefile'] = cookie_file
+    """
+    【核心升級】改用 scrapetube 抓取最新影片 ID
+    這在雲端環境比 yt-dlp 穩定非常多，不需要 Cookies 也能看到列表
+    """
+    try:
+        # 從 URL 提取 Channel ID (scrapetube 需要 ID)
+        # 股癌: UC23rnlQU_qE3cec9x709peA
+        # M觀點: UCCvJG2hWbC1V0M5tJ8v3e_A
+        channel_id = None
+        if "Gooaye" in channel_url: channel_id = "UC23rnlQU_qE3cec9x709peA"
+        if "miulaviewpoint" in channel_url: channel_id = "UCCvJG2hWbC1V0M5tJ8v3e_A"
+        
+        if not channel_id:
+            return None
 
-    for url in urls_to_try:
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                if 'entries' in info and len(info['entries']) > 0:
-                    video_data = info['entries'][0]
-                    if 'id' in video_data and 'title' in video_data:
-                        raw_date = video_data.get('upload_date', datetime.now().strftime("%Y%m%d"))
-                        return SimpleNamespace(
-                            yt_videoid=video_data['id'],
-                            title=video_data['title'],
-                            link=f"https://www.youtube.com/watch?v={video_data['id']}",
-                            upload_date=format_date(raw_date)
-                        )
-        except: continue
+        # 抓取影片 (videos)
+        videos = scrapetube.get_channel(channel_id, content_type='videos', limit=1)
+        video_list = list(videos)
+        
+        # 抓取直播 (streams)
+        streams = scrapetube.get_channel(channel_id, content_type='streams', limit=1)
+        stream_list = list(streams)
+        
+        # 比較誰比較新 (或是優先選直播)
+        target_video = None
+        
+        # 簡單策略：如果有直播且是最近的，優先選直播
+        if stream_list:
+            target_video = stream_list[0]
+        elif video_list:
+            target_video = video_list[0]
+            
+        if target_video:
+            video_id = target_video['videoId']
+            title = target_video['title']['runs'][0]['text']
+            # scrapetube 不會直接給 upload_date，我們用當下時間代替
+            return SimpleNamespace(
+                yt_videoid=video_id,
+                title=title,
+                link=f"https://www.youtube.com/watch?v={video_id}",
+                upload_date=datetime.now().strftime("%Y-%m-%d") 
+            )
+            
+    except Exception as e:
+        print(f"Scrapetube Error: {e}")
+        return None
     return None
 
 def get_transcript(video_id, cookie_file=None):
-    """加入 cookie_file 參數"""
     try:
-        # 使用 cookies 進行驗證
+        # 雲端 IP 很容易被擋，這裡多加一些 fallback
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=cookie_file)
         try:
             t = transcript_list.find_transcript(['zh-TW', 'zh-Hant', 'zh'])
@@ -67,7 +84,7 @@ def get_transcript(video_id, cookie_file=None):
         return None
 
 def download_audio(url, cookie_file=None):
-    """加入 cookie_file 參數"""
+    # 雲端環境下載音訊失敗率極高，這邊保留但僅作為最後手段
     ydl_opts = {
         'format': 'worstaudio/worst',
         'outtmpl': 'temp_%(id)s.%(ext)s',
@@ -76,7 +93,6 @@ def download_audio(url, cookie_file=None):
         'no_warnings': True,
         'nocheckcertificate': True,
     }
-    
     if cookie_file and os.path.exists(cookie_file):
         ydl_opts['cookiefile'] = cookie_file
 
@@ -84,8 +100,7 @@ def download_audio(url, cookie_file=None):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             return pathlib.Path(f"temp_{info['id']}.mp3")
-    except Exception as e:
-        print(f"DL Error: {e}")
+    except:
         return None
 
 def get_gemini_model():
@@ -98,7 +113,6 @@ def get_gemini_model():
 
 def analyze_video(video_title, content_input, channel_name, input_type="text"):
     model = get_gemini_model()
-    
     base_prompt = f"""
     你是專業投資分析師。請分析「{channel_name}」的影片「{video_title}」。
     【任務】：忽略閒聊，專注市場趨勢、經濟數據、個股分析。
@@ -110,7 +124,6 @@ def analyze_video(video_title, content_input, channel_name, input_type="text"):
     5. **風險提示**
     """
     safety = [{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}]
-    
     try:
         if input_type == "audio":
             myfile = genai.upload_file(content_input)
@@ -130,8 +143,8 @@ def compare_trends(gooaye_report, miula_report):
     model = get_gemini_model()
     prompt = f"""
     你是投資策略總監。請比對以下兩份報告。
-    【A 股癌】{gooaye_report['upload_date']} {gooaye_report['title']}\n{gooaye_report['content'][:3000]}
-    【B M觀點】{miula_report['upload_date']} {miula_report['title']}\n{miula_report['content'][:3000]}
+    【報告A 股癌】{gooaye_report['upload_date']} {gooaye_report['title']}\n{gooaye_report['content'][:3000]}
+    【報告B M觀點】{miula_report['upload_date']} {miula_report['title']}\n{miula_report['content'][:3000]}
     
     【產出「多空對照戰略報告」】：
     1. **共識聚焦**

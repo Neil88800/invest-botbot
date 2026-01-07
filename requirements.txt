@@ -6,3 +6,4 @@ requests
 pandas
 ffmpeg
 youtube-transcript-api
+scrapetube

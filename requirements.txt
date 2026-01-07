@@ -1,0 +1,6 @@
+streamlit
+google-genai
+yt-dlp
+feedparser
+requests
+pandas
